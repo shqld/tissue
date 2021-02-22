@@ -1,45 +1,74 @@
 import { Readable } from 'stream'
 import * as fs from 'fs'
 import * as rl from 'readline'
-import { LazyPromise } from './lazy-promise'
-import { Command } from './command'
 
-export class Output extends LazyPromise<string> {
-    private stream: Readable
+export class CommandOutput implements PromiseLike<string> {
+    public [Symbol.toStringTag] = 'CommandOutput'
+
+    private _stream: Readable
+    private _buf: Array<Buffer>
 
     constructor(stream: Readable) {
-        super()
-
-        this.stream = stream
+        this._stream = stream
+        this._buf = []
     }
 
-    protected chain = () => {
-        const buf: Array<Buffer> = []
+    public then(): Promise<void>
+    public then<T>(onFulfilled: (result: string) => T): Promise<T>
+    public then<T, C>(
+        onFulfilled: (result: string) => T,
+        onRejected: (error: unknown) => T
+    ): Promise<T | C>
+    public then(
+        onFulfilled?: (result: string) => any,
+        onRejected?: (error: unknown) => any
+    ): Promise<any> {
+        return this._awaited().then(onFulfilled, onRejected)
+    }
 
-        this.stream.setEncoding('utf8')
-        this.stream.on('data', (chunk) => buf.push(chunk))
+    public catch(): Promise<void>
+    public catch<C>(onRejected: (error: unknown) => C): Promise<C>
+    public catch(onRejected?: (error: unknown) => any): Promise<any> {
+        return this._awaited().catch(onRejected)
+    }
 
-        return this.then(() => Buffer.concat(buf).toString().trim())
+    public finally(onFinally?: () => void) {
+        return this._awaited().finally(onFinally)
     }
 
     get [Symbol.asyncIterator]() {
-        this.then()
-
         return rl.createInterface({
-            input: this.stream,
+            input: this._stream,
             crlfDelay: Infinity,
         })[Symbol.asyncIterator]
     }
 
     redirect(filePath: string): Promise<void> {
-        this.stream.pipe(fs.createWriteStream(filePath))
-        this.stream.setEncoding('utf8')
-
-        this.then()
-
         return new Promise((resolve, reject) => {
-            this.stream.on('end', resolve)
-            this.stream.on('error', reject)
+            this._stream
+                .pipe(fs.createWriteStream(filePath))
+                .once('end', resolve)
+                .once('error', reject)
         })
+    }
+
+    private _push = (chunk: Buffer) => {
+        this._buf.push(chunk)
+    }
+
+    private _awaited(): Promise<string> {
+        return new Promise((resolve, reject) =>
+            this._stream
+                .on('data', this._push)
+                .once('end', () => {
+                    this._stream.off('data', this._push)
+                    const str = Buffer.concat(this._buf).toString().trim()
+                    resolve(str)
+                })
+                .once('error', (err) => {
+                    this._stream.off('data', this._push)
+                    reject(err)
+                })
+        )
     }
 }

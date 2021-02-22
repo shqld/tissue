@@ -1,17 +1,18 @@
 import { $ } from '../src'
 import { execSync } from 'child_process'
-import { createMockOutput } from './lib/create-mock-output'
 
 process.on('unhandledRejection', console.error)
 
-describe('or', () => {
+describe('async-iteration', () => {
     {
-        const shell = 'false || echo string'
+        const shell = 'git log HEAD~3'
 
         it(shell, async () => {
-            const { res, mock } = createMockOutput()
+            const res = []
 
-            await $('false').or($('echo string', { output: mock }))
+            for await (const log of $('git log HEAD~3')) {
+                res.push(log)
+            }
 
             expect(res.join('')).toStrictEqual(
                 execSync(shell, {

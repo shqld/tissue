@@ -1,10 +1,33 @@
 # Tish
 
-> Auf den Tisch machen wir alles 😎
+> Auf den Tisch 😎
 
-Tish stands for `Tisch`, `(Java)TypeScript` and `ShellScript`, yay.
+Command operation util library in TypeScript, for those who know shell script but have been bothered with it.
 
 NOTE: still _under active development_ for now.
+
+## Examples
+
+```ts
+const gitAddAndCommit = (
+    path: string,
+    message: string,
+    opts: { squash: boolean }
+) => $('git add', [path])
+    .then($('git commit', {
+        '--message': message,
+        '--squash': opts.squash
+    })
+
+if (await $('git diff --exit-code')) {
+    for await (const file of $('git diff --name-only HEAD~4').stdout()) {
+        await gitAddAndCommit(
+            file,
+            'Fix a bug',
+            { squash: true }
+       )
+}
+```
 
 ## Install
 
@@ -13,18 +36,10 @@ $ npm install -D tish
 $ yarn add -D tish
 ```
 
-## Usage
+Also, :v:
 
 ```ts
-import { $ } from 'tish'
-
-// $ echo hello && echo world | sed 's/world/世界/'
-
-$('echo hello').and('echo world').pipe('sed "s/world/世界/"')
-// nothing happens
-
-await $('echo hello').and('echo world').pipe('sed "s/world/世界/"')
-// child processes are actually run
+require('tish').$('yarn add -D tish')
 ```
 
 ## Points
@@ -88,62 +103,3 @@ fs.createReadStream('file_a')
 -   [ ] Wrap thrown error by ChildProcess with a dedicated Error
 -   [x] Trim output string by default when `toString`
 -   [x] Implement `toNumber` and `toBoolean`
-
-## Usecases
-
-```sh
-$ echo hello | sed 's/hello/こんにちは/' && echo world
-```
-
-```js
-await $('echo hello').pipe("sed 's/hello/こんにちは/'").and('echo world')
-```
-
-### `>` and `||`
-
-```sh
-$ [ -s $file_path ] || echo "hello, world" > $file_path
-```
-
-```js
-await $('[ -s $file_path ]').or('echo "hello, world"').toFile('$file_path')
-
-// ----- You can make code more readable ------
-
-const doesFileExist = $('[ -s $file_path ]')
-const createFile = $('echo "hello, world"').toFile('$file_path')
-
-await doesFileExist.or(createFile)
-```
-
-### `for` iteration
-
-```sh
-$ for log in `git log --oneline HEAD~2..`; do
-  # some operations...
-done
-```
-
-```js
-for await (const log of $('git log --oneline HEAD~2..')) {
-    // some operations...
-}
-```
-
-### `if` control
-
-```sh
-$ if (git diff --quiet); then
-  # no change
-else
-  # changed
-fi
-```
-
-```js
-if (await $('git diff --quiet').toBoolean()) {
-    // no change
-} else {
-    // changed
-}
-```

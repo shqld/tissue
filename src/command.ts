@@ -1,175 +1,169 @@
-import { PassThrough, Readable, Writable } from 'stream'
+import * as rl from 'readline'
+import { Duplex, DuplexOptions } from 'stream'
+
 import spawn from 'cross-spawn'
-import createDebug from 'debug'
-import { LazyPromise } from './lazy-promise'
-import { Output } from './output'
-import { CommandResult } from './result'
+import classnames from 'classnames'
+import type { ClassValue } from 'classnames/types'
 
-const debug = createDebug('tish')
-
-const getId = () => {
-    const d = new Date()
-    return `${d.getUTCMilliseconds()}${Math.floor(Math.random() * 100)}`
-}
+import { Process } from './process'
+import { CommandOutput } from './output'
+import type { CommandResult } from './result'
+import { CommandError } from './error'
 
 export type Options = Partial<{
     cwd: string
     env: Record<string, string>
     timeout: number
+    stream: DuplexOptions
 }>
 
-const defaultOptions: Readonly<Options> = Object.freeze({
+const defaultOptions: Options = Object.freeze({
     env: undefined,
     cwd: undefined,
     timeout: undefined,
 })
 
-export class CommandError extends Error {
-    result: CommandResult
-
-    constructor(result: CommandResult) {
-        super('Command Failed')
-
-        this.result = result
-    }
-}
-
-CommandError.prototype.name = 'CommandError'
-
-export class Command extends LazyPromise<CommandResult> {
-    public readonly options: Readonly<Options>
+export class Command extends Duplex implements PromiseLike<CommandResult> {
     public [Symbol.toStringTag] = 'Command'
 
-    private id: string
-    private readonly command: string
-    private result?: CommandResult
-    private debug: (...args: Array<any>) => void
-    private stdio: Partial<{ stdin: Readable; stdout: Writable; stderr: Writable }> = {
-        stdin: undefined,
-        stdout: undefined,
-        stderr: undefined,
-    }
+    protected proc: Process
 
-    static create = (command: string, options?: Options): Command => {
+    private readonly _id: number
+    private readonly _command: string
+
+    static create(command: string | Process, options?: Options): Command
+    static create(command: string | Process, args: Array<ClassValue>, options?: Options): Command
+    static create(command: string | Process, ...ctorArgs: Array<unknown>): Command {
+        const options = ctorArgs.pop() as Options
+        const args = ctorArgs.pop() as Array<ClassValue>
+
+        if (args) {
+            command += ' '
+            command += classnames(args)
+        }
+
         return new Command(command, options)
     }
 
-    static context(options: Options): typeof Command.create
-    static context<T, Callback extends ($: typeof Command.create) => Promise<T>>(
-        options: Options,
-        callback: Callback
-    ): Promise<T | void>
+    constructor(command: string | Process, options?: Options) {
+        super(options?.stream)
 
-    static context(
-        context: Options,
-        callback?: Function
-    ): typeof Command.create | Promise<unknown> {
-        const create = (command: string, options?: Options) =>
-            Command.create(command, { ...context, ...options })
+        options = { ...defaultOptions, ...options }
 
-        return callback ? callback(create) : create
-    }
+        if (typeof command === 'string') {
+            const [name, ...args] = command.split(' ')
 
-    constructor(command: string, options?: Options) {
-        super()
-
-        this.id = getId()
-        this.command = command
-        this.options = { ...defaultOptions, ...options }
-
-        const scopedDebug = debug.extend(this.id)
-        this.debug = (...args) => scopedDebug(`(${this.command})`, ...args)
-
-        this.chain = this.exec
-    }
-
-    private exec = (): Promise<CommandResult> => {
-        this.debug('run')
-
-        if (this.result) {
-            const { status } = this.result
-
-            if (status === 0) {
-                Promise.resolve(this.result)
-            } else {
-                Promise.reject(new CommandError(this.result))
-            }
-        }
-
-        const [name, ...args] = this.command.split(' ')
-
-        const proc = spawn(name, args, {
-            stdio: [this.stdio.stdin, this.stdio.stdout, this.stdio.stderr],
-            cwd: this.options.cwd,
-            env: this.options.env,
-            timeout: this.options.timeout,
-            shell: true,
-        })
-
-        return new Promise((resolve, reject) => {
-            proc.on('exit', (status) => {
-                this.debug('exit', { status })
-
-                proc.on('close', () => {
-                    this.debug('close')
-
-                    if (typeof status !== 'number') {
-                        // TODO(@shqld): a dedicated error
-                        throw new Error()
-                    }
-
-                    const result: CommandResult = {
-                        command: this.command,
-                        status,
-                        stdout: proc.stdout ? new Output(proc.stdout) : undefined,
-                        stderr: proc.stderr ? new Output(proc.stderr) : undefined,
-                    }
-
-                    this.result = result
-
-                    if (status === 0) {
-                        resolve(result)
-                    } else {
-                        reject(new CommandError(result))
-                    }
-                })
+            this.proc = spawn(name, args, {
+                stdio: 'pipe',
+                cwd: options.cwd,
+                env: options.env,
+                timeout: options.timeout,
+                shell: true,
             })
-        })
-    }
-
-    toString(source: 'stdout' | 'stderr' | 'both' = 'stdout'): Output {
-        const stream = new PassThrough()
-
-        if (source === 'both' || source === 'stdout') this.stdio.stdout = stream
-        if (source === 'both' || source === 'stdout') this.stdio.stderr = stream
-
-        return new Output(stream)
-    }
-
-    pipe(command: Command | string): Command {
-        const next = command instanceof Command ? command : Command.create(command)
-
-        const passThrough = new PassThrough()
-
-        this.stdio.stdout = passThrough
-        next.stdio.stdin = passThrough
-
-        const chain = next.chain
-        next.chain = () => this.then(chain)
-
-        return next
-    }
-
-    async quiet(): Promise<boolean> {
-        try {
-            await this
-            return true
-        } catch (err) {
-            if (err instanceof CommandError && err.result.status === 1) {
-                return false
-            }
-
-            throw err
+            this._command = command
+        } else {
+            this.proc = command
+            this._command = this.proc.spawnfile + this.proc.spawnargs.join(' ')
         }
+
+        this._id = this.proc.pid
+
+        if (this.proc.stdin) {
+            this.once('unpipe', () => {
+                this.proc.stdin!.end()
+            })
+            this.once('end', () => {
+                this.proc.stdin!.end()
+            })
+        }
+
+        if (this.proc.stdout) {
+            // this.proc.stdout = clonable(this.proc.stdout)
+            this.proc.stdout.on('data', (data) => {
+                this.push(data)
+            })
+            this.proc.stdout.once('end', () => {
+                this.push(null)
+            })
+        }
+
+        if (this.proc.stderr) {
+            // this.proc.stderr = clonable(this.proc.stderr)
+        }
+    }
+
+    public [Symbol.asyncIterator](): AsyncIterableIterator<string> {
+        return rl
+            .createInterface({
+                input: this,
+                crlfDelay: Infinity,
+            })
+            [Symbol.asyncIterator]()
+    }
+
+    // public pipe<T extends Command | NodeJS.WritableStream>(destination: T): T {
+    //     return super.pipe(destination) as T
+    // }
+
+    public stdout(): CommandOutput | undefined {
+        return this.proc.stdout ? new CommandOutput(this.proc.stdout) : undefined
+    }
+    public stderr(): CommandOutput | undefined {
+        return this.proc.stderr ? new CommandOutput(this.proc.stderr) : undefined
+    }
+
+    public then(): Promise<void>
+    public then<T>(onFulfilled: (result: CommandResult) => T): Promise<T>
+    public then<T, C>(
+        onFulfilled: (result: CommandResult) => T,
+        onRejected: (error: unknown | CommandError) => T
+    ): Promise<T | C>
+    public then(
+        onFulfilled?: (result: CommandResult) => any,
+        onRejected?: (error: unknown | CommandError) => any
+    ): Promise<any> {
+        return this._awaited.then(onFulfilled, onRejected)
+    }
+
+    public catch(): Promise<void>
+    public catch<C>(onRejected: (error: unknown | CommandError) => C): Promise<C>
+    public catch(onRejected?: (error: unknown | CommandError) => any): Promise<any> {
+        return this._awaited.catch(onRejected)
+    }
+
+    public finally(onFinally?: () => void) {
+        return this._awaited.finally(onFinally)
+    }
+
+    public _read(size: number): void {}
+
+    public _write(
+        chunk: any,
+        encoding: BufferEncoding,
+        done: (error: Error | null | undefined) => void
+    ): void {
+        this.proc.stdin?.write(chunk, encoding, done)
+    }
+
+    private _promise: Promise<CommandResult> | undefined
+    private get _awaited() {
+        return (this._promise ??= new Promise((resolve, reject) => {
+            this.proc.on('exit', (status) => {
+                if (typeof status !== 'number') {
+                    throw new Error('Command exited unsuccessfully')
+                }
+
+                const result = {
+                    status,
+                    command: this,
+                }
+
+                if (status === 0) {
+                    resolve(result)
+                } else {
+                    reject(new CommandError(result))
+                }
+            })
+        }))
     }
 }
